@@ -50,6 +50,7 @@ jobs:
           dotnet build tests/LocalRemote.Checks/LocalRemote.Checks.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'Checks failed to compile.' }
       - name: Build and package
+        shell: powershell
         run: |
           try {
             & ./scripts/Package.ps1
