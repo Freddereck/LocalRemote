@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+dist/
+*.user
+*.log
+.cache/
+third_party/ffmpeg/ffmpeg.exe
+artifacts/
+*.zip
+*.pdb
+*.identity
+*.connection
+.vs/
