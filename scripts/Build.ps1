@@ -7,7 +7,7 @@ $taskSelfContained = if ($FrameworkDependent) { 'false' } else { 'true' }
 $taskFfmpeg = Join-Path $taskRoot 'third_party\ffmpeg'
 if (-not (Test-Path -LiteralPath (Join-Path $taskFfmpeg 'ffmpeg.exe'))) { & (Join-Path $PSScriptRoot 'Get-FFmpeg.ps1') }
 & dotnet publish $taskProject -c Release -r win-x64 --self-contained $taskSelfContained `
-    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $taskOutput
+    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o $taskOutput
 if ($LASTEXITCODE -ne 0) { throw 'Сборка не выполнена.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Configure-Firewall.ps1') -Destination $taskOutput -Force
 foreach ($taskDoc in @('README.md','INSTALL.md','VERIFICATION.md','LICENSE','THIRD_PARTY.md')) { Copy-Item -LiteralPath (Join-Path $taskRoot $taskDoc) -Destination $taskOutput -Force }

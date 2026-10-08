@@ -1,0 +1,56 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Validate release version
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a stable version tag, for example v0.4.0.' }
+          [xml]$project = Get-Content src/LocalRemote/LocalRemote.csproj -Raw
+          if ($env:GITHUB_REF_NAME -ne ('v' + $project.Project.PropertyGroup.Version)) { throw 'Tag and application version differ.' }
+      - name: Compile checks
+        run: |
+          dotnet build tests/LocalRemote.Checks/LocalRemote.Checks.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Checks failed to compile.' }
+      - name: Build and package
+        run: |
+          & ./scripts/Package.ps1
+          $expected = $env:GITHUB_REF_NAME.Substring(1)
+          $actual = (Get-Item dist/LocalRemote/LocalRemote.exe).VersionInfo.ProductVersion
+          if ($actual.Split('+')[0] -ne $expected) { throw 'Packaged executable has the wrong version.' }
+      - name: Publish ZIP and SHA-256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path -LiteralPath $notes)) { throw 'Release notes are missing.' }
+          gh release create $tag artifacts/release/LocalRemote-win-x64.zip artifacts/release/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --verify-tag --title "LocalRemote $tag" --notes-file $notes --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

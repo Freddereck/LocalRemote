@@ -2,6 +2,10 @@
 
 Удалённое управление Windows-компьютерами в локальной сети.
 
+**[Скачать готовую сборку для Windows x64](https://github.com/Freddereck/LocalRemote/releases/latest/download/LocalRemote-win-x64.zip)** · [Все релизы](https://github.com/Freddereck/LocalRemote/releases)
+
+Распакуйте ZIP целиком и запустите `LocalRemote.exe`. .NET и FFmpeg входят в комплект.
+
 ![LocalRemote — подключение к компьютеру](docs/images/localremote.png)
 
 ## Зачем я это сделал
