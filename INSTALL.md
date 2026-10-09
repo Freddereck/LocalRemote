@@ -1,4 +1,4 @@
-# LocalRemote 0.5.0
+# LocalRemote 0.5.1
 
 ## Обновление с LocalRemote 0.4
 
