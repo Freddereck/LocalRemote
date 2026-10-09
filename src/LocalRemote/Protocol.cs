@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Buffers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -54,11 +55,15 @@ public static class Wire
         await gate.WaitAsync(timeout.Token);
         try
         {
-            byte[] header = new byte[5];
-            header[0] = (byte)type;
-            BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(1), data.Length);
-            await stream.WriteAsync(header, timeout.Token);
-            await stream.WriteAsync(data, timeout.Token);
+            byte[] packet = ArrayPool<byte>.Shared.Rent(5 + data.Length);
+            try
+            {
+                packet[0] = (byte)type;
+                BinaryPrimitives.WriteInt32BigEndian(packet.AsSpan(1), data.Length);
+                data.CopyTo(packet, 5);
+                await stream.WriteAsync(packet.AsMemory(0, 5 + data.Length), timeout.Token);
+            }
+            finally { ArrayPool<byte>.Shared.Return(packet, clearArray: true); }
         }
         finally { gate.Release(); }
     }

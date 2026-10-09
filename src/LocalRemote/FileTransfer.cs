@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 
 namespace LocalRemote;
 
-public sealed record FileRequest(Guid Id, string Operation, string Path = "", string Name = "", long Length = 0, bool Overwrite = false, int Page = 0);
+public sealed record FileRequest(Guid Id, string Operation, string Path = "", string Name = "", long Length = 0, bool Overwrite = false, int Page = 0, int RateLimitMiB = 4);
 public sealed record FileEntry(string Name, string Path, bool Directory, long Length = 0, DateTime Modified = default);
 public sealed record FileReply(Guid Id, string State, string Path = "", long Length = 0, string Hash = "", string Error = "", FileEntry[]? Entries = null, bool HasMore = false);
 public sealed record TransferProgress(long Completed, long Total);
@@ -24,10 +24,12 @@ public static class FileBlocks
         if (offset < 0) throw new InvalidDataException("Неверная позиция в файле.");
         return (new(bytes.AsSpan(0, 16)), offset, bytes[24..]);
     }
-    public static async Task LimitRateAsync(Stopwatch watch, long bytes, CancellationToken token)
+    public static bool IsValidRate(int rateLimitMiB) => rateLimitMiB is >= 0 and <= 1024;
+    public static async Task LimitRateAsync(Stopwatch watch, long bytes, int rateLimitMiB, CancellationToken token)
     {
-        // A bounded transfer rate leaves bandwidth for desktop video and input.
-        int wait = (int)Math.Max(0, bytes * 1000d / (4 * 1024 * 1024) - watch.Elapsed.TotalMilliseconds);
+        if (!IsValidRate(rateLimitMiB)) throw new ArgumentOutOfRangeException(nameof(rateLimitMiB));
+        if (rateLimitMiB == 0) return;
+        int wait = (int)Math.Clamp(bytes * 1000d / (rateLimitMiB * 1024d * 1024) - watch.Elapsed.TotalMilliseconds, 0, 1000);
         if (wait > 0) await Task.Delay(wait, token);
     }
 }
@@ -62,6 +64,7 @@ public sealed class RemoteFileServer : IAsyncDisposable
         try
         {
             if (request.Id == Guid.Empty) throw new IOException("Неверный номер запроса.");
+            if (!FileBlocks.IsValidRate(request.RateLimitMiB)) throw new IOException("Неверное ограничение скорости передачи.");
             switch (request.Operation)
             {
                 case "roots":
@@ -109,7 +112,7 @@ public sealed class RemoteFileServer : IAsyncDisposable
                     if (!File.Exists(source)) throw new FileNotFoundException("Файл не найден.");
                     lock (downloadGate) if (downloads.Count > 0) throw new IOException("Скачивание уже выполняется.");
                     var cancel = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    var task = Task.Run(() => DownloadAsync(request.Id, source, cancel.Token), CancellationToken.None);
+                    var task = Task.Run(() => DownloadAsync(request.Id, source, request.RateLimitMiB, cancel.Token), CancellationToken.None);
                     lock (downloadGate) downloads.Add(request.Id, (task, cancel));
                     _ = task.ContinueWith(_ => { lock (downloadGate) downloads.Remove(request.Id); cancel.Dispose(); }, TaskScheduler.Default);
                     break;
@@ -138,7 +141,7 @@ public sealed class RemoteFileServer : IAsyncDisposable
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         { upload.Dispose(); upload = null; await ReplyAsync(new(block.Id, "error", Error: ex.Message.Truncate(700))); }
     }
-    private async Task DownloadAsync(Guid id, string path, CancellationToken cancellation)
+    private async Task DownloadAsync(Guid id, string path, int rateLimitMiB, CancellationToken cancellation)
     {
         try
         {
@@ -151,7 +154,7 @@ public sealed class RemoteFileServer : IAsyncDisposable
             {
                 cancellation.ThrowIfCancellationRequested();
                 await Wire.WriteAsync(stream, writeGate, PacketType.FileChunk, FileBlocks.Encode(id, offset, buffer.AsSpan(0, count)), token);
-                hash.AppendData(buffer.AsSpan(0, count)); offset += count; await FileBlocks.LimitRateAsync(watch, offset, cancellation);
+                hash.AppendData(buffer.AsSpan(0, count)); offset += count; await FileBlocks.LimitRateAsync(watch, offset, rateLimitMiB, cancellation);
             }
             await ReplyAsync(new(id, "complete", path, offset, Convert.ToHexString(hash.GetHashAndReset())));
         }
@@ -182,6 +185,13 @@ public sealed class FileTransferClient : IAsyncDisposable
         public readonly IncrementalHash Hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         public readonly TaskCompletionSource<FileReply> Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<FileReply> Completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private long reportedAt;
+        public void Report(long completed, long total, bool force = false)
+        {
+            long now = Environment.TickCount64;
+            if (!force && now - reportedAt < 100) return;
+            reportedAt = now; Progress?.Report(new(completed, total));
+        }
         public void Dispose() { Output?.Dispose(); Hash.Dispose(); }
     }
     public FileTransferClient(Func<PacketType, byte[], CancellationToken, Task> send, CancellationToken lifetime) { this.send = send; this.lifetime = lifetime; }
@@ -223,13 +233,14 @@ public sealed class FileTransferClient : IAsyncDisposable
             if (transfer.Stopped) return;
             if (block.Offset != transfer.Received || block.Data.Length > transfer.Total - transfer.Received) throw new IOException("Повреждена передача файла.");
             await transfer.Output.WriteAsync(block.Data, lifetime); transfer.Hash.AppendData(block.Data); transfer.Received += block.Data.Length;
-            transfer.Progress?.Report(new(transfer.Received, transfer.Total));
+            transfer.Report(transfer.Received, transfer.Total, transfer.Received == transfer.Total);
         }
         catch (Exception ex) { transfer.Completed.TrySetException(ex); }
         finally { transfer.IoGate.Release(); }
     }
-    public async Task UploadAsync(string source, string remoteFolder, bool overwrite, IProgress<TransferProgress>? progress, CancellationToken cancellation)
+    public async Task UploadAsync(string source, string remoteFolder, bool overwrite, IProgress<TransferProgress>? progress, CancellationToken cancellation, int rateLimitMiB = 4)
     {
+        if (!FileBlocks.IsValidRate(rateLimitMiB)) throw new ArgumentOutOfRangeException(nameof(rateLimitMiB));
         using var token = CancellationTokenSource.CreateLinkedTokenSource(lifetime, cancellation);
         await transferGate.WaitAsync(token.Token);
         var transfer = new Transfer { Id = Guid.NewGuid(), Progress = progress };
@@ -244,8 +255,8 @@ public sealed class FileTransferClient : IAsyncDisposable
             {
                 if (transfer.Completed.Task.IsFaulted) await transfer.Completed.Task;
                 await send(PacketType.FileChunk, FileBlocks.Encode(transfer.Id, offset, buffer.AsSpan(0, count)), token.Token);
-                transfer.Hash.AppendData(buffer.AsSpan(0, count)); offset += count; progress?.Report(new(offset, file.Length));
-                await FileBlocks.LimitRateAsync(watch, offset, token.Token);
+                transfer.Hash.AppendData(buffer.AsSpan(0, count)); offset += count; transfer.Report(offset, file.Length, offset == file.Length);
+                await FileBlocks.LimitRateAsync(watch, offset, rateLimitMiB, token.Token);
             }
             await send(PacketType.FileRequest, Wire.Json(new FileRequest(transfer.Id, "finish")), token.Token);
             var result = await transfer.Completed.Task.WaitAsync(TimeSpan.FromSeconds(30), token.Token);
@@ -254,8 +265,9 @@ public sealed class FileTransferClient : IAsyncDisposable
         catch { await CancelAsync(transfer.Id); throw; }
         finally { lock (gate) active = null; transfer.Dispose(); transferGate.Release(); }
     }
-    public async Task DownloadAsync(string remotePath, string target, bool overwrite, IProgress<TransferProgress>? progress, CancellationToken cancellation)
+    public async Task DownloadAsync(string remotePath, string target, bool overwrite, IProgress<TransferProgress>? progress, CancellationToken cancellation, int rateLimitMiB = 4)
     {
+        if (!FileBlocks.IsValidRate(rateLimitMiB)) throw new ArgumentOutOfRangeException(nameof(rateLimitMiB));
         using var token = CancellationTokenSource.CreateLinkedTokenSource(lifetime, cancellation);
         await transferGate.WaitAsync(token.Token);
         string partial = target + ".localremote-" + Guid.NewGuid().ToString("N") + ".partial";
@@ -265,7 +277,7 @@ public sealed class FileTransferClient : IAsyncDisposable
         {
             if (File.Exists(target) && !overwrite) throw new IOException("Файл уже существует.");
             transfer.Output = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileBlocks.BlockSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            await send(PacketType.FileRequest, Wire.Json(new FileRequest(transfer.Id, "download", remotePath)), token.Token);
+            await send(PacketType.FileRequest, Wire.Json(new FileRequest(transfer.Id, "download", remotePath, RateLimitMiB: rateLimitMiB)), token.Token);
             await transfer.Ready.Task.WaitAsync(TimeSpan.FromSeconds(15), token.Token);
             var result = await transfer.Completed.Task.WaitAsync(token.Token);
             await transfer.IoGate.WaitAsync(token.Token);

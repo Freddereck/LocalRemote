@@ -21,7 +21,7 @@ public sealed class ViewerClient : IAsyncDisposable
     private H264Decoder? decoder;
     public long VideoBytesReceived { get; private set; }
     public FileTransferClient Files { get; }
-    public ViewerClient() { Files = new FileTransferClient(QueueAsync, lifetime.Token); }
+    public ViewerClient() { Files = new FileTransferClient(SendFileAsync, lifetime.Token); }
     public event Func<FrameData, Task>? FrameReceived;
     public event Action<VideoInfo>? VideoStarted;
     public event Action<string>? StatusChanged;
@@ -40,7 +40,7 @@ public sealed class ViewerClient : IAsyncDisposable
         if (reply.Type == PacketType.Error) throw new AuthenticationException(Encoding.UTF8.GetString(reply.Data));
         if (reply.Type != PacketType.Welcome) throw new InvalidDataException("Хост не подтвердил подключение.");
         var welcome = Wire.Parse<WelcomeInfo>(reply.Data);
-        if (welcome.ProtocolVersion != 2) throw new InvalidDataException("Обновите LocalRemote на обоих компьютерах до одной версии.");
+        if (welcome.ProtocolVersion != 3) throw new InvalidDataException("Обновите LocalRemote на обоих компьютерах до версии 0.5 или новее.");
         if (welcome.Monitors.Length is < 1 or > 64 || welcome.Monitors.Any(m => m.Width is < 1 or > 32768 || m.Height is < 1 or > 32768)) throw new InvalidDataException("Неверная информация об экранах.");
         return welcome;
     }
@@ -102,7 +102,13 @@ public sealed class ViewerClient : IAsyncDisposable
         if (!lifetime.IsCancellationRequested && !outgoing.Writer.TryWrite(new(type, data)))
         { StatusChanged?.Invoke("Ввод остановлен: сеть не успевает передавать команды. Переподключитесь."); Stop(); }
     }
-    private async Task QueueAsync(PacketType type, byte[] data, CancellationToken token) => await outgoing.Writer.WriteAsync(new(type, data), token);
+    private async Task SendFileAsync(PacketType type, byte[] data, CancellationToken token)
+    {
+        // Await the actual write; bulk data must not fill the keyboard/heartbeat queue.
+        token.ThrowIfCancellationRequested();
+        // Complete a started packet before cancellation so the following cancel request stays framed.
+        await Wire.WriteAsync(stream ?? throw new IOException("Соединение закрыто."), writeGate, type, data, lifetime.Token);
+    }
     private void Stop() { lifetime.Cancel(); outgoing.Writer.TryComplete(); client.Dispose(); }
     public async ValueTask DisposeAsync()
     {

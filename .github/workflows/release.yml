@@ -1,0 +1,86 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths:
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Validate and check out release tag
+        run: |
+          [xml]$project = Get-Content src/LocalRemote/LocalRemote.csproj -Raw
+          $tag = 'v' + $project.Project.PropertyGroup.Version
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a stable version, for example v0.4.0.' }
+          if ($env:GITHUB_REF.StartsWith('refs/tags/') -and $env:GITHUB_REF_NAME -ne $tag) { throw 'Tag and application version differ.' }
+          if (-not $env:GITHUB_REF.StartsWith('refs/tags/')) {
+            git fetch origin "refs/tags/${tag}:refs/tags/${tag}" --depth=1
+            if ($LASTEXITCODE -ne 0) { throw 'Release tag does not exist.' }
+            git checkout --detach $tag
+            if ($LASTEXITCODE -ne 0) { throw 'Could not check out the tagged source.' }
+          }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Compile checks
+        run: |
+          dotnet build tests/LocalRemote.Checks/LocalRemote.Checks.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Checks failed to compile.' }
+      - name: Build and package
+        shell: powershell
+        run: |
+          try {
+            & ./scripts/Package.ps1
+            $expected = $env:RELEASE_TAG.Substring(1)
+            $actual = (Get-Item dist/LocalRemote/LocalRemote.exe).VersionInfo.ProductVersion
+            if ($actual.Split('+')[0] -ne $expected) { throw 'Packaged executable has the wrong version.' }
+          } catch {
+            $message = ($_.Exception.Message + "`n" + $_.ScriptStackTrace).Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+            Write-Output "::error title=Release packaging failed::$message"
+            throw
+          }
+      - name: Publish ZIP and SHA-256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path -LiteralPath $notes)) { throw 'Release notes are missing.' }
+          $draft = gh release view $tag --repo $env:GITHUB_REPOSITORY --json isDraft --jq '.isDraft' 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if ($draft -eq 'true') {
+              gh release upload $tag artifacts/release/LocalRemote-win-x64.zip artifacts/release/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --clobber
+              if ($LASTEXITCODE -ne 0) { throw 'Draft upload failed.' }
+              gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest --title "LocalRemote $tag" --notes-file $notes
+              if ($LASTEXITCODE -ne 0) { throw 'Draft publication failed.' }
+            }
+            Write-Output "Release $tag is published."
+            exit 0
+          }
+          gh release create $tag artifacts/release/LocalRemote-win-x64.zip artifacts/release/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --verify-tag --title "LocalRemote $tag" --notes-file $notes --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

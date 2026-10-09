@@ -35,8 +35,9 @@ try {
     [IO.Directory]::CreateDirectory($taskOutput) | Out-Null
     [IO.Compression.ZipFileExtensions]::ExtractToFile($taskEntry[0], $taskBinary, $true)
 } finally { $taskZip.Dispose() }
-$taskVersion = & $taskBinary -version | Select-Object -First 1
+$taskVersionLines = & $taskBinary -version
 if ($LASTEXITCODE -ne 0) { throw 'FFmpeg did not start.' }
+$taskVersion = $taskVersionLines | Select-Object -First 1
 if ($taskVersion -notmatch '-g([a-f0-9]+)-') { throw 'Cannot identify the FFmpeg source revision.' }
 $taskCommit = Invoke-RestMethod -Uri ("https://api.github.com/repos/FFmpeg/FFmpeg/commits/" + $Matches[1]) -Headers $taskHeaders
 $taskSourceArchive = "https://github.com/FFmpeg/FFmpeg/archive/$($taskCommit.sha).tar.gz"

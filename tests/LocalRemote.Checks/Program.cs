@@ -19,6 +19,7 @@ internal static class Program
             if (args.Length == 2 && args[0] == "--render-ui") { RenderUi(args[1]); return 0; }
             if (args.Length == 1 && args[0] == "--video-checks") { FeatureChecks.RunVideoChecksAsync().GetAwaiter().GetResult(); return 0; }
             if (args.Length == 1 && args[0] == "--startup-checks") { StartupChecks.RunAsync().GetAwaiter().GetResult(); return 0; }
+            if (args.Length == 1 && args[0] == "--file-speed-checks") { FileSpeedChecks.RunAsync().GetAwaiter().GetResult(); return 0; }
             StartupChecks.RunAsync().GetAwaiter().GetResult(); RunAsync().GetAwaiter().GetResult(); FeatureChecks.RunAsync().GetAwaiter().GetResult(); RunUiReconnectCheck(); Console.WriteLine("All checks passed."); return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }

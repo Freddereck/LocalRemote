@@ -11,6 +11,7 @@ internal static class FeatureChecks
         Check(new VideoOptions().Fit(new(1920,1080)) == new Size(1280,720), "720p profile preserves 16:9 dimensions");
         Check(!new VideoOptions(Fps: 1000).IsValid() && !new VideoOptions(Width: 8192).IsValid(), "unsafe video settings rejected");
         await FilesAsync();
+        await FileSpeedChecks.RunAsync();
         if (FfmpegTools.FindExecutable() == null) throw new Exception("FFmpeg is missing from the feature verification environment.");
         await RunVideoChecksAsync();
     }

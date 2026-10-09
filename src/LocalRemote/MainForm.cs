@@ -40,7 +40,7 @@ public sealed class MainForm : Form
         tabs.TabPages.Add(BuildViewerTab()); tabs.TabPages.Add(BuildHostTab());
         Controls.Add(tabs);
         Controls.Add(UiTheme.Header());
-        Controls.Add(UiTheme.Footer(new Label { Text = "Локальная сеть · v0.4.0", AutoSize = true, ForeColor = UiTheme.Muted, Font = new("Segoe UI", 9) }));
+        Controls.Add(UiTheme.Footer(new Label { Text = $"Локальная сеть · v{typeof(MainForm).Assembly.GetName().Version?.ToString(3)}", AutoSize = true, ForeColor = UiTheme.Muted, Font = new("Segoe UI", 9) }));
         UiTheme.StyleTabs(tabs); UiTheme.Apply(this);
         if (autoHost) tabs.SelectedIndex = 1;
         var menu = new ContextMenuStrip();

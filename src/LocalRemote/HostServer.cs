@@ -86,7 +86,7 @@ public sealed class HostServer : IAsyncDisposable
                 int selected = Array.FindIndex(monitors, m => m.Primary);
                 if (selected < 0) selected = 0;
                 VideoOptions options = videoFactory != null ? new() : new(Mode: "jpeg", Fps: 30);
-                await Wire.WriteAsync(stream, writeGate, PacketType.Welcome, Wire.Json(new WelcomeInfo(Environment.MachineName, monitors, selected, options.Fps, ProtocolVersion: 2, SupportsVideo: videoFactory != null)), session.Token);
+                await Wire.WriteAsync(stream, writeGate, PacketType.Welcome, Wire.Json(new WelcomeInfo(Environment.MachineName, monitors, selected, options.Fps, ProtocolVersion: 3, SupportsVideo: videoFactory != null)), session.Token);
                 files = new RemoteFileServer(stream, writeGate, session.Token);
                 StatusChanged?.Invoke("Подключён: " + ((IPEndPoint)client.Client.RemoteEndPoint!).Address);
                 frames = Task.Run(async () =>

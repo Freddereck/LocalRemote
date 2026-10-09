@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace LocalRemote;
 
 public sealed class FileManagerForm : Form
@@ -14,6 +16,9 @@ public sealed class FileManagerForm : Form
     private readonly Button cancel = new UiButton { Text = "Отменить передачу", Tone = ButtonTone.Danger, Enabled = false, MinimumSize = new(150, 40) };
     private readonly ProgressBar progress = new() { Dock = DockStyle.Fill, Maximum = 1000, Height = 20 };
     private readonly Label status = new() { AutoSize = true, Text = "Выберите файл и папку назначения." };
+    private readonly ComboBox speedLimit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, AccessibleName = "Ограничение скорости передачи файлов" };
+    private readonly Label metrics = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, AutoEllipsis = true, ForeColor = UiTheme.Muted, Text = "Выберите лимит перед передачей.", AccessibleName = "Скорость передачи и оставшееся время" };
+    private readonly int[] rateLimits = [0, 32, 16, 4];
     private int remotePage;
     private bool busy;
     private bool closing;
@@ -21,15 +26,20 @@ public sealed class FileManagerForm : Form
     {
         this.remote = remote;
         Text = "LocalRemote · файлы между компьютерами"; Font = new("Segoe UI", 10); AutoScaleMode = AutoScaleMode.Dpi;
-        Size = new(1100, 720); MinimumSize = new(850, 550); StartPosition = FormStartPosition.CenterParent;
+        Size = new(1100, 720); MinimumSize = new(850, 600); StartPosition = FormStartPosition.CenterParent;
         var split = new SplitContainer { Dock = DockStyle.Fill, Size = new(1060,500), SplitterDistance = 520, Panel1MinSize = 250, Panel2MinSize = 250, SplitterWidth = 12, BackColor = UiTheme.Canvas, Padding = new(12, 12, 12, 0) };
         split.Panel1.Controls.Add(BuildPane("Этот ПК", localPath, localList, false));
         split.Panel2.Controls.Add(BuildPane("Второй ПК", remotePath, remoteList, true));
-        var footer = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 110, Padding = new(18, 12, 18, 12), ColumnCount = 1, RowCount = 2, BackColor = UiTheme.Paper };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 154, Padding = new(18, 12, 18, 12), ColumnCount = 1, RowCount = 3, BackColor = UiTheme.Paper };
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
         actions.Controls.Add(upload); actions.Controls.Add(download); actions.Controls.Add(cancel);
-        footer.RowStyles.Add(new(SizeType.Absolute, 58)); footer.RowStyles.Add(new(SizeType.Percent, 100));
-        footer.Controls.Add(actions, 0, 0); footer.Controls.Add(progress, 0, 1);
+        speedLimit.Items.AddRange(["Без лимита", "32 МиБ/с", "16 МиБ/с", "4 МиБ/с · для стрима"]); speedLimit.SelectedIndex = 0;
+        var rateRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new(0, 0, 0, 8) };
+        rateRow.ColumnStyles.Add(new(SizeType.AutoSize)); rateRow.ColumnStyles.Add(new(SizeType.Absolute, 210)); rateRow.ColumnStyles.Add(new(SizeType.Percent, 100));
+        rateRow.Controls.Add(new Label { Text = "Скорость:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new(0, 0, 12, 0) }, 0, 0);
+        rateRow.Controls.Add(speedLimit, 1, 0); rateRow.Controls.Add(metrics, 2, 0);
+        footer.RowStyles.Add(new(SizeType.Absolute, 54)); footer.RowStyles.Add(new(SizeType.Absolute, 44)); footer.RowStyles.Add(new(SizeType.Percent, 100));
+        footer.Controls.Add(actions, 0, 0); footer.Controls.Add(rateRow, 0, 1); footer.Controls.Add(progress, 0, 2);
         Controls.Add(split); Controls.Add(footer);
         Controls.Add(UiTheme.Footer(status)); status.ForeColor = UiTheme.Muted;
         UiTheme.Apply(this);
@@ -129,7 +139,8 @@ public sealed class FileManagerForm : Form
         if (selected.Length == 0 || selected.Any(e => e.Directory)) { ShowError("Выберите один или несколько файлов. Передача папок пока не поддерживается."); return; }
         string destination = sending ? remotePath.Text : localPath.Text;
         if (destination.Length == 0) { ShowError("Откройте папку назначения."); return; }
-        busy = true; upload.Enabled = download.Enabled = false; cancel.Enabled = true;
+        int rateLimitMiB = rateLimits[speedLimit.SelectedIndex];
+        busy = true; upload.Enabled = download.Enabled = speedLimit.Enabled = false; cancel.Enabled = true;
         transfer = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         try
         {
@@ -143,21 +154,45 @@ public sealed class FileManagerForm : Form
                     if (answer == DialogResult.Cancel) throw new OperationCanceledException();
                     if (answer == DialogResult.No) continue; overwrite = true;
                 }
+                var watch = Stopwatch.StartNew(); long lastBytes = 0; double lastSample = 0, bytesPerSecond = 0;
+                bool fileActive = true; metrics.Text = "Измерение скорости…";
                 var updates = new Progress<TransferProgress>(p =>
                 {
-                    if (closing) return; progress.Value = p.Total == 0 ? 1000 : (int)Math.Clamp(p.Completed * 1000d / p.Total, 0, 1000);
+                    if (closing || !fileActive) return; progress.Value = p.Total == 0 ? 1000 : (int)Math.Clamp(p.Completed * 1000d / p.Total, 0, 1000);
                     status.Text = (sending ? "Отправка: " : "Скачивание: ") + entry.Name + $" · {FormatBytes(p.Completed)} / {FormatBytes(p.Total)}";
+                    double elapsed = watch.Elapsed.TotalSeconds;
+                    if (elapsed - lastSample >= .5)
+                    {
+                        bytesPerSecond = (p.Completed - lastBytes) / (elapsed - lastSample); lastBytes = p.Completed; lastSample = elapsed;
+                    }
+                    if (bytesPerSecond > 0)
+                    {
+                        double remaining = Math.Max(0, p.Total - p.Completed) / bytesPerSecond;
+                        metrics.Text = $"{bytesPerSecond / (1024 * 1024):0.0} МиБ/с · осталось {FormatTime(remaining)}";
+                    }
                 });
                 progress.Value = 0;
-                if (sending) await remote().UploadAsync(entry.Path, destination, overwrite, updates, transfer.Token);
-                else await remote().DownloadAsync(entry.Path, Path.Combine(destination, entry.Name), overwrite, updates, transfer.Token);
+                try
+                {
+                    if (sending) await remote().UploadAsync(entry.Path, destination, overwrite, updates, transfer.Token, rateLimitMiB);
+                    else await remote().DownloadAsync(entry.Path, Path.Combine(destination, entry.Name), overwrite, updates, transfer.Token, rateLimitMiB);
+                    watch.Stop();
+                    if (!closing) metrics.Text = $"Средняя скорость: {entry.Length / Math.Max(.001, watch.Elapsed.TotalSeconds) / (1024 * 1024):0.0} МиБ/с";
+                }
+                finally { fileActive = false; }
             }
             if (!closing) { progress.Value = 1000; status.Text = "Передача завершена. Контрольные суммы файлов проверены."; }
             await RefreshLocalAsync(); await RefreshRemoteAsync();
         }
         catch (OperationCanceledException) { if (!closing) status.Text = "Передача отменена."; }
         catch (Exception ex) { ShowError("Не удалось передать файл: " + ex.Message); }
-        finally { transfer.Dispose(); transfer = null; busy = false; if (!closing) { upload.Enabled = download.Enabled = true; cancel.Enabled = false; } }
+        finally { transfer.Dispose(); transfer = null; busy = false; if (!closing) { upload.Enabled = download.Enabled = speedLimit.Enabled = true; cancel.Enabled = false; } }
+    }
+    private static string FormatTime(double seconds)
+    {
+        seconds = Math.Min(seconds, 365 * 24 * 3600d);
+        var time = TimeSpan.FromSeconds(Math.Ceiling(seconds));
+        return time.TotalHours >= 1 ? $"{(int)time.TotalHours} ч {time.Minutes:00} мин" : time.TotalMinutes >= 1 ? $"{(int)time.TotalMinutes} мин {time.Seconds:00} с" : $"{time.Seconds} с";
     }
     private void ShowError(string text) { if (!closing) MessageBox.Show(this, text, "LocalRemote · файлы", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     private static string FormatBytes(long bytes) => bytes >= 1024L * 1024 * 1024 ? $"{bytes / (1024d * 1024 * 1024):0.0} ГБ" : bytes >= 1024 * 1024 ? $"{bytes / (1024d * 1024):0.0} МБ" : bytes >= 1024 ? $"{bytes / 1024d:0.0} КБ" : $"{bytes} Б";
